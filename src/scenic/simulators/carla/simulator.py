@@ -8,6 +8,7 @@ except ImportError as e:
 import math
 import os
 import warnings
+import time
 
 import scenic.core.errors as errors
 if errors.verbosityLevel == 0:	# suppress pygame advertisement at zero verbosity
@@ -23,14 +24,20 @@ import scenic.simulators.carla.utils.utils as utils
 import scenic.simulators.carla.utils.visuals as visuals
 
 
+
 class CarlaSimulator(DrivingSimulator):
 	"""Implementation of `Simulator` for CARLA."""
 	def __init__(self, carla_map, map_path, address='127.0.0.1', port=2000, timeout=10,
 				 render=True, record='', timestep=0.1, traffic_manager_port=None):
 		super().__init__()
 		verbosePrint(f'Connecting to CARLA on port {port}')
-		self.client = carla.Client(address, port)
+		self.client = carla.Client(address, 3000)
 		self.client.set_timeout(timeout)  # limits networking operations (seconds)
+		self.world = None
+		try:
+			self.world = self.client.get_world() #try to get a currently loaded map
+		except:
+			pass
 		if carla_map is not None:
 			self.world = self.client.load_world(carla_map)
 		else:
@@ -56,6 +63,7 @@ class CarlaSimulator(DrivingSimulator):
 		self.render = render  # visualization mode ON/OFF
 		self.record = record  # whether to use the carla recorder
 		self.scenario_number = 0  # Number of the scenario executed
+		
 
 	def createSimulation(self, scene, verbosity=0):
 		self.scenario_number += 1
@@ -74,13 +82,15 @@ class CarlaSimulator(DrivingSimulator):
 
 
 class CarlaSimulation(DrivingSimulation):
-	def __init__(self, scene, client, tm, timestep, render, record, scenario_number, verbosity=0):
+	def __init__(self, scene, client, tm, timestep, render, record, scenario_number, verbosity=0, iteration=1):
 		super().__init__(scene, timestep=timestep, verbosity=verbosity)
 		self.client = client
 		self.world = self.client.get_world()
 		self.map = self.world.get_map()
 		self.blueprintLib = self.world.get_blueprint_library()
 		self.tm = tm
+		self.iteration = iteration
+		self.autoware_actor = None
 		
 		weather = scene.params.get("weather")
 		if weather is not None:
@@ -115,13 +125,33 @@ class CarlaSimulation(DrivingSimulation):
 			name = "{}/scenario{}.log".format(self.record, self.scenario_number)
 			self.client.start_recorder(name)
 
+		#self.world.tick()
+		autoware_vehicle = None
+		for actor in self.world.get_actors():
+			if actor.attributes.get('role_name') == 'ego_vehicle': # LB_c: ROS modification
+				autoware_vehicle = actor
+				print(f'THe autoware vehcile is: {autoware_vehicle}')
+				self.autoware_actor = autoware_vehicle
+				if self.iteration < 2:# LB_C: ros mod
+					for _ in range(50): #200 initial, maybe too long
+						print("sleeping for control apply")
+						self.world.tick()
+						time.sleep(0.01)
+				actor.apply_control(carla.VehicleControl(manual_gear_shift=True, gear=1))
+
 		# Create Carla actors corresponding to Scenic objects
 		self.ego = None
 		for obj in self.objects:
-			carlaActor = self.createObjectInSimulator(obj)
+			
 
 			# Check if ego (from carla_scenic_taks.py)
 			if obj is self.objects[0]:
+				if autoware_vehicle: # LB_c: ROS modification
+									# FIXME: I think, we should send the position to the controller instead of publising to ROS
+					
+					carlaActor = self.createObjectROS(obj, autoware_vehicle)
+				else:
+					carlaActor = self.createObjectInSimulator(obj)				
 				self.ego = obj
 
 				# Set up camera manager and collision sensor for ego
@@ -132,6 +162,7 @@ class CarlaSimulation(DrivingSimulation):
 					self.cameraManager._transform_index = camPosIndex
 					self.cameraManager.set_sensor(camIndex)
 					self.cameraManager.set_transform(self.camTransform)
+			else: carlaActor = self.createObjectInSimulator(obj)
 
 		self.world.tick() ## allowing manualgearshift to take effect 	# TODO still need this?
 
@@ -149,6 +180,38 @@ class CarlaSimulation(DrivingSimulation):
 					obj.carlaActor.set_target_velocity(equivVel)
 				else:
 					obj.carlaActor.set_velocity(equivVel)
+		
+		message = utils.set_emergency_stop(False)
+		os.system(message)
+	def createObjectROS(self, obj, carla_actor):
+		obj.carlaActor = carla_actor
+
+		rot = utils.scenicToCarlaRotation(obj.heading )
+		[qx, qy, qz, qw] = utils.carla_rotation_to_ros_quaternion_custom(rot)
+		# x = 3
+		x = obj.position[0]
+		# y = -2
+		y = obj.position[1]
+		z = 0
+		# w = 0.1
+		w = obj.heading
+		message = utils.create_initial_position_message(x, y, z, qx, qy, qz, qw)
+		#for _ in range(3): # LB_C: ros mod
+		os.system(message) 
+		print("just finished message")
+		for _ in range(20): # TODO: instead of sleep we should read the topic to determine wether Autoware is engaged or not 100
+                        		 # the command is ros2 topic echo /api/iv_msgs/autoware/state. we need only message though.
+			self.world.tick()
+			time.sleep(0.01)
+			print("sleeping after generating ROS")
+		
+		# probably needed by scenic to identify crashes or something
+		if isinstance(carla_actor, carla.Vehicle):
+			# TODO should get dimensions at compile time, not simulation time
+			obj.width = carla_actor.bounding_box.extent.y * 2
+			obj.length = carla_actor.bounding_box.extent.x * 2
+		return carla_actor
+
 
 	def createObjectInSimulator(self, obj):
 		# Extract blueprint
@@ -260,6 +323,11 @@ class CarlaSimulation(DrivingSimulation):
 	def destroy(self):
 		for obj in self.objects:
 			if obj.carlaActor is not None:
+				if obj.carlaActor == self.autoware_actor:
+					print("saving autoware vehicle")
+					message = utils.set_emergency_stop(True)
+					os.system(message)
+					continue
 				if isinstance(obj.carlaActor, carla.Vehicle):
 					obj.carlaActor.set_autopilot(False, self.tm.get_port())
 				if isinstance(obj.carlaActor, carla.Walker):

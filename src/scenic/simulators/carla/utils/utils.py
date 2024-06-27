@@ -3,6 +3,8 @@ import math
 
 from scenic.core.vectors import Vector
 from scenic.core.geometry import normalizeAngle
+from transforms3d.euler import euler2quat
+
 
 
 def snapToGround(world, location, blueprint):
@@ -68,3 +70,69 @@ def scenicToCarlaTrafficLightStatus(status):
 
 def carlaToScenicTrafficLightStatus(status):
 	return str(status).lower()
+
+
+
+def carla_rotation_to_RPY(carla_rotation):
+    """
+    Convert a carla rotation to a roll, pitch, yaw tuple
+
+    Considers the conversion from left-handed system (unreal) to right-handed
+    system (ROS).
+    Considers the conversion from degrees (carla) to radians (ROS).
+
+    :param carla_rotation: the carla rotation
+    :type carla_rotation: carla.Rotation
+    :return: a tuple with 3 elements (roll, pitch, yaw)
+    :rtype: tuple
+    """
+    roll = math.radians(carla_rotation.roll)
+    pitch = -math.radians(carla_rotation.pitch)
+    yaw = -math.radians(carla_rotation.yaw)
+
+    return (roll, pitch, yaw)
+
+def carla_rotation_to_ros_quaternion_custom(carla_rotation):
+    """
+    Convert a carla rotation to a ROS quaternion
+
+    Considers the conversion from left-handed system (unreal) to right-handed
+    system (ROS).
+    Considers the conversion from degrees (carla) to radians (ROS).
+
+    :param carla_rotation: the carla rotation
+    :type carla_rotation: carla.Rotation
+    :return: a ROS quaternion
+    :rtype: geometry_msgs.msg.Quaternion
+    """
+    roll, pitch, yaw = carla_rotation_to_RPY(carla_rotation)
+    quat = euler2quat(roll, pitch, yaw)
+    return [quat[1], quat[2], quat[3], quat[0]]
+
+def create_engage_message(engage): # TODO: maybe we need to integrate this with ros instead of sending a message
+	message =  f'ros2 topic pub /autoware/engage autoware_auto_vehicle_msgs/msg/Engage "engage: {engage}" -1'
+	return message
+
+def create_goal_message(x, y, z, qx, qy, qz, qw):
+	message =  '''ros2 topic pub -1 /planning/mission_planning/goal geometry_msgs/PoseStamped '{header: {stamp: {sec: 0, nanosec: 0}, frame_id: "map"}, pose: {position: '''
+	message += "{x: " + f'{x}, y: ' + f'{y}, z: ' f'{z}' 
+	message += "}, orientation: " 
+	message += '{x: ' + f'{qx}, y: ' + f'{qy}, z: ' + f'{qz}, w: ' + f'{qw}'
+	message += '''}}} ' '''
+	return message
+
+def create_initial_position_message(x, y, z, qx, qy, qz, qw):
+	# TODO: create a cleaner method. 
+	# TODO: the conversion euler angles to quaternions is not ok yet
+	message = "ros2 topic pub -1 /initialpose geometry_msgs/PoseWithCovarianceStamped '{ header: {stamp: {sec: 0, nanosec: 0}, frame_id: " 
+	message += '"map"}, pose: { pose: {position: {' 
+	message += f"x: {x}, y: {y}, z: {z}" 
+	message += "}, orientation: " 
+	message += '{x: ' + f'{qx}, y: ' + f'{qy}, z: ' + f'{qz}, w: ' + f'{qw}'
+	message += '}}, } }' + "'" 
+	return message
+
+def set_emergency_stop(status):
+
+	message = f'ros2 service call /api/external/set/emergency tier4_external_api_msgs/srv/SetEmergency "emergency: {status}"'
+	return message

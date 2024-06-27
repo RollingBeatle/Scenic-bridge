@@ -4,8 +4,9 @@
 import enum
 import time
 import types
+import socket
 from collections import OrderedDict, defaultdict
-
+import os
 from scenic.core.object_types import (enableDynamicProxyFor, setDynamicProxyFor,
                                       disableDynamicProxyFor)
 from scenic.core.distributions import RejectionException
@@ -14,6 +15,10 @@ import scenic.core.errors as errors
 from scenic.core.errors import RuntimeParseError, InvalidScenarioError, optionallyDebugRejection
 from scenic.core.requirements import RequirementType
 from scenic.core.vectors import Vector
+#import scenic.simulators.carla.utils.utils as utils
+
+RUN_SIMULATION = 'RUN_SIMULATION'
+STOP_SIMULATION = 'STOP_SIMULATION'
 
 class SimulatorInterfaceWarning(UserWarning):
     """Warning indicating an issue with the interface to an external simulator."""
@@ -42,7 +47,7 @@ class Simulator:
     """
 
     def simulate(self, scene, maxSteps=None, maxIterations=100, verbosity=None,
-                 raiseGuardViolations=False):
+                 raiseGuardViolations=False, main_socket=None):
         """Run a simulation for a given scene.
 
         For details on how simulations are run, see `dynamic scenario semantics`.
@@ -81,7 +86,7 @@ class Simulator:
             # Run a single simulation
             try:
                 simulation = self.createSimulation(scene, verbosity=verbosity)
-                simulation.run(maxSteps)
+                simulation.run(maxSteps, main_socket)
             except (RejectSimulationException, RejectionException, dynamics.GuardViolation) as e:
                 if verbosity >= 2:
                     print(f'  Rejected simulation {iterations} at time step '
@@ -142,7 +147,7 @@ class Simulation:
         self.verbosity = verbosity
         self.worker_num = 0
 
-    def run(self, maxSteps):
+    def run(self, maxSteps, main_socket:socket=None):
         """Run the simulation.
 
         Throws a RejectSimulationException if a requirement is violated.
@@ -156,7 +161,11 @@ class Simulation:
         import scenic.syntax.veneer as veneer
         veneer.beginSimulation(self)
         dynamicScenario = self.scene.dynamicScenario
-
+        if main_socket: # LB_C: ros mod
+            for _ in range(100): # TODO: how to set the number of iterations
+                print(f'{_} step in run of 0.05 sleep')
+                self.step()
+                time.sleep(0.05)        
         try:
             # Initialize dynamic scenario
             dynamicScenario._start()
@@ -194,17 +203,22 @@ class Simulation:
                 # "Always" and scenario-level requirements have been checked;
                 # now safe to terminate if the top-level scenario has finished,
                 # a monitor requested termination, or we've hit the timeout
+                print(f"The current time is: {self.currentTime}")
                 if terminationReason is not None:
+                    print(f'breaking because termination reason :{terminationReason}')
                     break
                 terminationReason = dynamicScenario._checkSimulationTerminationConditions()
                 if terminationReason is not None:
                     terminationType = TerminationType.simulationTerminationCondition
+                    print(f'breaking because termination reason 2 :{terminationReason}')
                     break
                 if maxSteps and self.currentTime >= maxSteps:
                     terminationReason = f'reached time limit ({maxSteps} steps)'
                     terminationType = TerminationType.timeLimit
+                    print(f'breaking because termination reason max :{terminationReason}')
                     break
-
+                if main_socket:
+                    main_socket.send(RUN_SIMULATION.encode())
                 # Compute the actions of the agents in this time step
                 allActions = OrderedDict()
                 schedule = self.scheduleForAgents()
@@ -216,7 +230,10 @@ class Simulation:
                     if isinstance(actions, EndSimulationAction):
                         terminationReason = str(actions)
                         terminationType = TerminationType.terminatedByBehavior
-                        break
+                        print(main_socket)
+                        if main_socket == None:
+                            print("socket is none")
+                            break
                     assert isinstance(actions, tuple)
                     if len(actions) == 1 and isinstance(actions[0], (list, tuple)):
                         actions = tuple(actions[0])
@@ -225,6 +242,7 @@ class Simulation:
                                                    f' action(s) {actions}')
                     allActions[agent] = actions
                 if terminationReason is not None:
+                    print(f'breaking because termination last reason :{terminationReason}')
                     break
 
                 # Execute the actions
@@ -238,6 +256,18 @@ class Simulation:
                 self.step()
                 self.updateObjects()
                 self.currentTime += 1
+
+            if main_socket:
+                print("sending stop signal")
+                main_socket.send(STOP_SIMULATION.encode())
+                for agent in schedule: 
+                    behavior = agent.behavior
+                    if not behavior._runningIterator:   # TODO remove hack
+                        behavior._start(agent)
+                    actions = behavior._step()
+                   # message = utils.set_emergency_stop(True)
+                    #os.system(message)
+
 
             # Stop all remaining scenarios
             # (and reject if some 'require eventually' condition was never satisfied)

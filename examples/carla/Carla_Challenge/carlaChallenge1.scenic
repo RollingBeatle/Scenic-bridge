@@ -9,9 +9,10 @@ its original lane.
 param map = localPath('../../../tests/formats/opendrive/maps/CARLA/Town01.xodr')  # or other CARLA map that definitely works
 param carla_map = 'Town01'
 model scenic.simulators.carla.model
+param render = True
 
 ## CONSTANTS
-EGO_MODEL = "vehicle.lincoln.mkz2017"
+EGO_MODEL = "vehicle.tesla.model3"
 EGO_SPEED = 10
 
 ## DEFINING BEHAVIORS
